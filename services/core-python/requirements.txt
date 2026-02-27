@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+asyncpg
+qdrant-client
+httpx
+pydantic
