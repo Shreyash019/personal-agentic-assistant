@@ -1,0 +1,26 @@
+{
+  "type": "function",
+  "function": {
+    "name": "create_task",
+    "description": "Creates a new actionable task in the local Postgres database based on the user's request. Use this when the user explicitly asks to remember something, set a reminder, or create a to-do item.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "A concise, actionable title for the task (max 50 characters)."
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed context or steps required to complete the task. Leave empty if not provided."
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "The urgency of the task. Default to 'medium' unless the user implies urgency."
+        }
+      },
+      "required": ["title", "priority"]
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SSE_Data_Payloads",
+  "description": "Defines the JSON structure for the 'data:' field of various SSE events streamed to the client.",
+  "oneOf": [
+    {
+      "title": "Event Type: message",
+      "description": "Standard text chunk from the LLM during RAG or normal conversation.",
+      "type": "object",
+      "properties": {
+        "content": { "type": "string" }
+      },
+      "required": ["content"]
+    },
+    {
+      "title": "Event Type: tool_call",
+      "description": "Emitted when the Orchestrator detects the LLM wants to execute a tool, signaling the UI to show a loading state.",
+      "type": "object",
+      "properties": {
+        "tool": { "type": "string" },
+        "status": { "type": "string", "enum": ["executing"] },
+        "args": { 
+          "type": "object",
+          "description": "The parsed arguments from the LLM, e.g., title and priority."
+        }
+      },
+      "required": ["tool", "status", "args"]
+    },
+    {
+      "title": "Event Type: tool_result",
+      "description": "Emitted after the Go/Python backend successfully inserts the data into Postgres.",
+      "type": "object",
+      "properties": {
+        "tool": { "type": "string" },
+        "status": { "type": "string", "enum": ["success", "error"] },
+        "task_id": { "type": "string", "description": "The returned UUID from Postgres." },
+        "error_msg": { "type": "string", "description": "Populated only if status is error." }
+      },
+      "required": ["tool", "status"]
+    }
+  ]
+}

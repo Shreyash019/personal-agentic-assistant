@@ -10,7 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"core-go/internal/agent"
 	"core-go/internal/db"
+	"core-go/internal/vector"
 )
 
 type healthResponse struct {
@@ -32,11 +34,11 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	ctx := context.Background()
 
+	// ── PostgreSQL ────────────────────────────────────────────────────────────
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		dsn = "postgres://admin:secretpassword@localhost:5432/agent_db"
 	}
-
 	pool, err := db.NewPool(ctx, dsn)
 	if err != nil {
 		log.Fatalf("db pool: %v", err)
@@ -44,17 +46,29 @@ func main() {
 	defer pool.Close()
 
 	taskRepo := db.NewTaskRepository(pool)
-	_ = taskRepo // wired to handlers as routes are added
 
+	// ── Qdrant ────────────────────────────────────────────────────────────────
+	qdrantURL := os.Getenv("QDRANT_URL")
+	if qdrantURL == "" {
+		qdrantURL = "http://localhost:6333"
+	}
+	qdrantClient := vector.NewQdrantClient(qdrantURL)
+
+	// ── Agent services ────────────────────────────────────────────────────────
+	kb := agent.NewKnowledgeBase(qdrantClient)
+	ta := agent.NewTaskAgent(taskRepo)
+
+	// ── Routes ───────────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", healthHandler)
+	mux.HandleFunc("POST /api/v1/chat", chatHandler(kb, ta))
 
+	// ── Server ────────────────────────────────────────────────────────────────
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: mux,
 	}
 
-	// Run server in background goroutine so main can block on signal.
 	go func() {
 		log.Println("core-go listening on :8080")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -62,7 +76,7 @@ func main() {
 		}
 	}()
 
-	// Block until SIGINT or SIGTERM received.
+	// Block until SIGINT or SIGTERM.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
