@@ -66,20 +66,21 @@ type Chunk struct {
 }
 
 // CreateTaskTool is the Ollama tool schema for the create_task function.
-// Pass this (or a slice containing it) to StreamChat.
+// Matches shared/tools/create_task.json exactly: priority is a string enum,
+// NOT an integer. Pass this (or a slice containing it) to StreamChat.
 var CreateTaskTool = Tool{
 	Type: "function",
 	Function: ToolFunction{
 		Name:        "create_task",
-		Description: "Create a new task in the database with a title, optional description, and priority.",
+		Description: "Creates a new actionable task in the local Postgres database based on the user's request. Use this when the user explicitly asks to remember something, set a reminder, or create a to-do item.",
 		Parameters: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"title":       {"type": "string",  "description": "Short task title"},
-				"description": {"type": "string",  "description": "Detailed description of the task"},
-				"priority":    {"type": "integer", "description": "Priority level: 0 = low, 1 = medium, 2 = high, 3 = urgent"}
+				"title":       {"type": "string", "description": "A concise, actionable title for the task (max 50 characters)."},
+				"description": {"type": "string", "description": "Detailed context or steps required to complete the task. Leave empty if not provided."},
+				"priority":    {"type": "string", "enum": ["low", "medium", "high"], "description": "The urgency of the task. Default to 'medium' unless the user implies urgency."}
 			},
-			"required": ["title"]
+			"required": ["title", "priority"]
 		}`),
 	},
 }

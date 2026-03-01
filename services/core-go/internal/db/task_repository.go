@@ -11,8 +11,9 @@ import (
 type TaskID int64
 
 // TaskRepository defines write operations on the tasks table.
+// priority is a VARCHAR string ("low", "medium", "high") matching init.sql.
 type TaskRepository interface {
-	CreateTask(ctx context.Context, title, description string, priority int) (TaskID, error)
+	CreateTask(ctx context.Context, title, description, priority string) (TaskID, error)
 }
 
 type pgxTaskRepository struct {
@@ -26,7 +27,7 @@ func NewTaskRepository(pool *pgxpool.Pool) TaskRepository {
 
 // CreateTask inserts a new task row and returns its generated ID.
 // Uses a parameterized query with RETURNING to avoid a separate SELECT round-trip.
-func (r *pgxTaskRepository) CreateTask(ctx context.Context, title, description string, priority int) (TaskID, error) {
+func (r *pgxTaskRepository) CreateTask(ctx context.Context, title, description, priority string) (TaskID, error) {
 	const query = `
 		INSERT INTO tasks (title, description, priority)
 		VALUES ($1, $2, $3)

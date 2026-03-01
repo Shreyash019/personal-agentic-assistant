@@ -34,11 +34,16 @@ type AgentEvent struct {
 
 // --- Schema validation ---
 
+// createTaskArgs mirrors the arguments schema in shared/tools/create_task.json.
+// Priority is a string enum — never an integer.
 type createTaskArgs struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
-	Priority    int    `json:"priority"`
+	Priority    string `json:"priority"`
 }
+
+// validPriorities is the canonical set from shared/tools/create_task.json.
+var validPriorities = map[string]bool{"low": true, "medium": true, "high": true}
 
 func validateCreateTaskArgs(raw json.RawMessage) (createTaskArgs, error) {
 	var args createTaskArgs
@@ -48,8 +53,11 @@ func validateCreateTaskArgs(raw json.RawMessage) (createTaskArgs, error) {
 	if strings.TrimSpace(args.Title) == "" {
 		return args, fmt.Errorf("'title' is required and must be non-empty")
 	}
-	if args.Priority < 0 || args.Priority > 3 {
-		return args, fmt.Errorf("'priority' must be 0–3, got %d", args.Priority)
+	if args.Priority == "" {
+		args.Priority = "medium" // schema default
+	}
+	if !validPriorities[args.Priority] {
+		return args, fmt.Errorf("'priority' must be one of low|medium|high, got %q", args.Priority)
 	}
 	return args, nil
 }
@@ -59,7 +67,7 @@ func validateCreateTaskArgs(raw json.RawMessage) (createTaskArgs, error) {
 const agentSystemPrompt = `You are a personal task management assistant.
 When the user wants to create, add, or record a task, use the create_task tool.
 Extract the task title (required), description (if mentioned), and priority
-(if mentioned; 0=low 1=medium 2=high 3=urgent; default 0).
+(if mentioned; must be "low", "medium", or "high"; default "medium").
 If the user's intent is not to create a task, respond conversationally without using a tool.`
 
 // --- TaskAgent ---
@@ -179,6 +187,8 @@ func (ta *TaskAgent) streamSummary(
 	taskID int64,
 	out chan<- AgentEvent,
 ) {
+	fallbackText := fmt.Sprintf("Task created successfully (ID: %d).", taskID)
+
 	// Reconstruct the assistant's tool-call message for Ollama's history.
 	toolCallsJSON, _ := json.Marshal([]map[string]any{{
 		"function": map[string]any{
@@ -203,17 +213,20 @@ func (ta *TaskAgent) streamSummary(
 
 	summaryCh, err := llm.StreamChat(ctx, followUp, nil)
 	if err != nil {
-		emit(ctx, out, AgentEvent{
-			Kind:   EventError,
-			ErrMsg: fmt.Sprintf("summary stream: %v", err),
-		})
+		emit(ctx, out, AgentEvent{Kind: EventText, Text: fallbackText})
 		return
 	}
 
+	emittedText := false
 	for sc := range summaryCh {
 		if sc.Kind == llm.KindText {
+			emittedText = true
 			emit(ctx, out, AgentEvent{Kind: EventText, Text: sc.Text})
 		}
+	}
+
+	if !emittedText {
+		emit(ctx, out, AgentEvent{Kind: EventText, Text: fallbackText})
 	}
 }
 

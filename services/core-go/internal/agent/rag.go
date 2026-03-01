@@ -14,6 +14,15 @@ const (
 	ragTopK       = 3
 )
 
+var builtInKnowledge = []string{
+	"Generative AI (GenAI) is a class of AI systems that generate new content such as text, images, code, audio, or video from learned patterns in data.",
+	"Large language models are a common GenAI approach for text tasks. They predict likely next tokens based on context and instructions.",
+	"Retrieval-Augmented Generation (RAG) combines retrieval and generation: first retrieve relevant documents, then provide them as context to the model for grounded answers.",
+	"A standard RAG pipeline is: ingest documents -> split into chunks -> create embeddings -> store vectors -> retrieve top-k chunks for a query -> generate answer with those chunks.",
+	"RAG improves factual grounding and enables domain-specific answers without retraining the model. It can also reduce hallucinations when retrieval quality is good.",
+	"RAG quality depends on chunking strategy, embedding model quality, retrieval settings (top-k, filtering), and prompt instructions that force context-grounded responses.",
+}
+
 // systemPromptTmpl is intentionally strict: the model must answer only from
 // the supplied context and must not fabricate information.
 const systemPromptTmpl = `You are a personal knowledge assistant with access to the user's private notes and documents.
@@ -80,20 +89,31 @@ func (kb *KnowledgeBase) AskKnowledgeBase(ctx context.Context, query string) (<-
 // buildSystemPrompt formats the retrieved ScoredPoints into the strict
 // system prompt template. Each chunk is numbered [1]–[N].
 func buildSystemPrompt(points []vector.ScoredPoint) string {
-	if len(points) == 0 {
-		return fmt.Sprintf(systemPromptTmpl, "(no relevant context found)")
-	}
-
 	var sb strings.Builder
-	for i, p := range points {
+	idx := 1
+
+	for _, p := range points {
 		text, _ := p.Payload["text"].(string)
 		if text == "" {
 			text = "(empty chunk)"
 		}
-		if i > 0 {
+		if sb.Len() > 0 {
 			sb.WriteString("\n\n")
 		}
-		fmt.Fprintf(&sb, "[%d] %s", i+1, text)
+		fmt.Fprintf(&sb, "[%d] %s", idx, text)
+		idx++
+	}
+
+	for _, item := range builtInKnowledge {
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		fmt.Fprintf(&sb, "[%d] %s", idx, item)
+		idx++
+	}
+
+	if sb.Len() == 0 {
+		sb.WriteString("(no relevant context found)")
 	}
 
 	return fmt.Sprintf(systemPromptTmpl, sb.String())

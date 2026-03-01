@@ -1,0 +1,153 @@
+{
+  "info": {
+    "_postman_id": "b4b4d63d-5f06-4f2b-87f9-9ef10fd383f2",
+    "name": "Personal Agentic Assistant - Go Backend",
+    "description": "Postman collection for testing the Go backend APIs (health + SSE chat flows).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health - GET /health",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        },
+        "description": "Checks Go backend health status."
+      },
+      "response": []
+    },
+    {
+      "name": "Chat SSE - Normal Response",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "text/event-stream"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Say hello in one sentence\" }\n  ],\n  \"stream\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/chat",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "chat"
+          ]
+        },
+        "description": "Streams assistant text chunks as SSE event: message."
+      },
+      "response": []
+    },
+    {
+      "name": "Chat SSE - RAG Knowledge Mode",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "text/event-stream"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"Use RAG knowledge mode\" },\n    { \"role\": \"user\", \"content\": \"What is GenAI and how does RAG work?\" }\n  ],\n  \"stream\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/chat",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "chat"
+          ]
+        },
+        "description": "Forces RAG path by including a system message with knowledge context keyword."
+      },
+      "response": []
+    },
+    {
+      "name": "Chat SSE - Task Creation Tool Call",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "text/event-stream"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Create a high priority task: submit tax documents tomorrow\" }\n  ],\n  \"stream\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/chat",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "chat"
+          ]
+        },
+        "description": "Should emit event: tool_call, event: tool_result, and assistant response text."
+      },
+      "response": []
+    }
+  ]
+}

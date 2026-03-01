@@ -1,77 +1,71 @@
+/**
+ * useSSEChat — XHR-based Server-Sent Events hook for React Native / Hermes.
+ *
+ * Why XHR instead of fetch + getReader()?
+ * Hermes (the React Native JS engine) does not expose a streaming ReadableStream
+ * on fetch responses. XMLHttpRequest fires onreadystatechange progress events as
+ * bytes arrive (readyState 3 = LOADING), giving us the same incremental access
+ * without relying on the Web Streams API.
+ *
+ * Wire protocol: shared/api/chat_request.json + shared/api/sse_payloads.json
+ */
+
 import { useCallback, useReducer, useRef } from 'react';
 
-// ── Payload types (mirrors shared/api/sse_payloads.json) ──────────────────────
+// ── Public types ──────────────────────────────────────────────────────────────
 
-export type MessagePayload = {
+/** A single entry in the rendered conversation. */
+export type ChatMessage = {
+  role: 'user' | 'assistant' | 'system';
   content: string;
 };
 
-export type ToolCallPayload = {
-  tool: string;
-  status: 'executing';
-  args: Record<string, unknown>;
-};
-
-export type ToolResultPayload = {
-  tool: string;
-  status: 'success' | 'error';
-  task_id?: string;
-  error_msg?: string;
-};
-
-// ── Chat message model ────────────────────────────────────────────────────────
-
-export type TextPart = { kind: 'text'; content: string };
-export type ToolCallPart = { kind: 'tool_call'; tool: string; args: Record<string, unknown> };
-export type ToolResultPart = {
-  kind: 'tool_result';
-  tool: string;
-  status: 'success' | 'error';
-  taskId?: string;
-  errorMsg?: string;
-};
-
-export type AssistantPart = TextPart | ToolCallPart | ToolResultPart;
-
-export type UserMessage = { role: 'user'; text: string };
-export type AssistantMessage = { role: 'assistant'; parts: AssistantPart[] };
-export type ChatMessage = UserMessage | AssistantMessage;
-
-// ── State ─────────────────────────────────────────────────────────────────────
-
 export type ChatState = {
   messages: ChatMessage[];
+  /** True between event:tool_call and event:tool_result. */
+  isExecutingTool: boolean;
+  /** True while the XHR stream is open. */
   isStreaming: boolean;
+  /** Non-null when a network or pipeline error has occurred. */
   error: string | null;
 };
 
-// ── Actions ───────────────────────────────────────────────────────────────────
+export type UseSSEChatReturn = {
+  messages: ChatMessage[];
+  isExecutingTool: boolean;
+  isStreaming: boolean;
+  error: string | null;
+  sendMessage: (text: string) => void;
+  reset: () => void;
+};
+
+// ── Reducer ───────────────────────────────────────────────────────────────────
 
 type Action =
-  | { type: 'USER_MESSAGE'; text: string }
+  | { type: 'USER_MESSAGE'; content: string }
   | { type: 'STREAM_START' }
-  | { type: 'APPEND_TEXT'; content: string }
-  | { type: 'ADD_TOOL_CALL'; tool: string; args: Record<string, unknown> }
-  | { type: 'ADD_TOOL_RESULT'; tool: string; status: 'success' | 'error'; taskId?: string; errorMsg?: string }
+  | { type: 'APPEND_ASSISTANT_TEXT'; content: string }
+  | { type: 'TOOL_EXECUTING' }
+  | { type: 'TOOL_DONE'; systemMsg: string }
   | { type: 'STREAM_DONE' }
   | { type: 'STREAM_ERROR'; error: string }
   | { type: 'RESET' };
 
-// ── Reducer ───────────────────────────────────────────────────────────────────
-
 const initialState: ChatState = {
   messages: [],
+  isExecutingTool: false,
   isStreaming: false,
   error: null,
 };
 
 function chatReducer(state: ChatState, action: Action): ChatState {
   switch (action.type) {
+
     case 'USER_MESSAGE':
       return {
         ...state,
         error: null,
-        messages: [...state.messages, { role: 'user', text: action.text }],
+        messages: [...state.messages, { role: 'user', content: action.content }],
       };
 
     case 'STREAM_START':
@@ -79,73 +73,36 @@ function chatReducer(state: ChatState, action: Action): ChatState {
         ...state,
         isStreaming: true,
         error: null,
-        // Append an empty assistant turn; parts are pushed in as they arrive.
-        messages: [...state.messages, { role: 'assistant', parts: [] }],
+        // Open an empty assistant turn; text tokens are appended into it.
+        messages: [...state.messages, { role: 'assistant', content: '' }],
       };
 
-    case 'APPEND_TEXT': {
-      const messages = [...state.messages];
-      const last = messages[messages.length - 1];
-      if (last?.role !== 'assistant') return state;
-
-      const parts = [...last.parts];
-      const lastPart = parts[parts.length - 1];
-
-      if (lastPart?.kind === 'text') {
-        // Coalesce consecutive text chunks into a single part.
-        parts[parts.length - 1] = {
-          kind: 'text',
-          content: lastPart.content + action.content,
-        };
-      } else {
-        parts.push({ kind: 'text', content: action.content });
-      }
-
-      messages[messages.length - 1] = { role: 'assistant', parts };
-      return { ...state, messages };
+    case 'APPEND_ASSISTANT_TEXT': {
+      const msgs = [...state.messages];
+      const last = msgs[msgs.length - 1];
+      // Guard: only append if we have an open assistant turn.
+      if (!last || last.role !== 'assistant') return state;
+      msgs[msgs.length - 1] = { role: 'assistant', content: last.content + action.content };
+      return { ...state, messages: msgs };
     }
 
-    case 'ADD_TOOL_CALL': {
-      const messages = [...state.messages];
-      const last = messages[messages.length - 1];
-      if (last?.role !== 'assistant') return state;
+    case 'TOOL_EXECUTING':
+      return { ...state, isExecutingTool: true };
 
-      const part: ToolCallPart = {
-        kind: 'tool_call',
-        tool: action.tool,
-        args: action.args,
+    case 'TOOL_DONE':
+      return {
+        ...state,
+        isExecutingTool: false,
+        // Append a system message confirming the action so the user sees it
+        // in the conversation history even after the banner disappears.
+        messages: [...state.messages, { role: 'system', content: action.systemMsg }],
       };
-      messages[messages.length - 1] = {
-        role: 'assistant',
-        parts: [...last.parts, part],
-      };
-      return { ...state, messages };
-    }
-
-    case 'ADD_TOOL_RESULT': {
-      const messages = [...state.messages];
-      const last = messages[messages.length - 1];
-      if (last?.role !== 'assistant') return state;
-
-      const part: ToolResultPart = {
-        kind: 'tool_result',
-        tool: action.tool,
-        status: action.status,
-        taskId: action.taskId,
-        errorMsg: action.errorMsg,
-      };
-      messages[messages.length - 1] = {
-        role: 'assistant',
-        parts: [...last.parts, part],
-      };
-      return { ...state, messages };
-    }
 
     case 'STREAM_DONE':
       return { ...state, isStreaming: false };
 
     case 'STREAM_ERROR':
-      return { ...state, isStreaming: false, error: action.error };
+      return { ...state, isStreaming: false, isExecutingTool: false, error: action.error };
 
     case 'RESET':
       return initialState;
@@ -174,153 +131,181 @@ function parseSSEFrame(frame: string): { event: string; data: string } | null {
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
-export type ChatMode = 'rag' | 'agent';
+const DEFAULT_BASE_URL = 'http://localhost:8080'; // Go backend
 
-export type UseSSEChatOptions = {
-  /** Backend base URL. Defaults to Python service on localhost. */
-  baseUrl?: string;
-};
-
-export type UseSSEChatReturn = {
-  state: ChatState;
-  sendMessage: (query: string, mode?: ChatMode) => Promise<void>;
-  reset: () => void;
-};
-
-const DEFAULT_BASE_URL = 'http://localhost:8000';
-
-export function useSSEChat({
-  baseUrl = DEFAULT_BASE_URL,
-}: UseSSEChatOptions = {}): UseSSEChatReturn {
+export function useSSEChat(baseUrl = DEFAULT_BASE_URL): UseSSEChatReturn {
   const [state, dispatch] = useReducer(chatReducer, initialState);
-  const abortRef = useRef<AbortController | null>(null);
 
+  // XHR instance kept in a ref so sendMessage / reset can abort it.
+  const xhrRef = useRef<XMLHttpRequest | null>(null);
+  // Accumulates partial SSE frames that arrive split across XHR progress events.
+  const sseBufferRef = useRef('');
+  // Tracks how many characters of xhr.responseText we have already processed.
+  const processedRef = useRef(0);
+
+  // ── Frame dispatcher ──────────────────────────────────────────────────────
+  // dispatch is stable (guaranteed by useReducer), so this callback is safe
+  // to reference from inside the XHR closure without stale-closure risk.
+  const handleFrame = useCallback((event: string, rawData: string) => {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(rawData);
+    } catch {
+      // Malformed JSON — silently skip; never crash the stream.
+      return;
+    }
+
+    switch (event) {
+      // event: message → append text token to the current assistant turn.
+      case 'message': {
+        const { content } = payload as { content: string };
+        if (content) dispatch({ type: 'APPEND_ASSISTANT_TEXT', content });
+        break;
+      }
+
+      // event: tool_call → signal the UI to show the executing banner.
+      case 'tool_call':
+        dispatch({ type: 'TOOL_EXECUTING' });
+        break;
+
+      // event: tool_result → hide the banner and push a confirmation message.
+      case 'tool_result': {
+        const p = payload as {
+          status: 'success' | 'error';
+          task_id?: string;
+          error_msg?: string;
+        };
+        const systemMsg =
+          p.status === 'success'
+            ? `✅ Task created successfully (ID: ${p.task_id ?? 'unknown'})`
+            : `❌ Task creation failed: ${p.error_msg ?? 'Unknown error'}`;
+        dispatch({ type: 'TOOL_DONE', systemMsg });
+        break;
+      }
+
+      // event: error → surface as an error state; stream is now dead.
+      case 'error': {
+        const { error } = payload as { error: string };
+        dispatch({ type: 'STREAM_ERROR', error: error ?? 'Unknown stream error' });
+        xhrRef.current?.abort();
+        break;
+      }
+    }
+  }, []); // dispatch is stable, no deps needed
+
+  // ── sendMessage ───────────────────────────────────────────────────────────
   const sendMessage = useCallback(
-    async (query: string, mode: ChatMode = 'agent') => {
-      // Cancel any in-flight request before starting a new one.
-      abortRef.current?.abort();
-      const controller = new AbortController();
-      abortRef.current = controller;
+    (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
 
-      dispatch({ type: 'USER_MESSAGE', text: query });
+      // Abort any in-flight request and reset progressive-read state.
+      xhrRef.current?.abort();
+      sseBufferRef.current = '';
+      processedRef.current = 0;
+
+      dispatch({ type: 'USER_MESSAGE', content: trimmed });
       dispatch({ type: 'STREAM_START' });
 
-      try {
-        const response = await fetch(`${baseUrl}/api/v1/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query, mode }),
-          signal: controller.signal,
-          // React Native opt-in for streaming response bodies.
-          // The key is not in the standard DOM typedefs, so we silence TS here.
-          // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-          // @ts-expect-error
-          reactNative: { textStreaming: true },
-        });
+      const xhr = new XMLHttpRequest();
+      xhrRef.current = xhr;
 
-        if (!response.ok) {
-          const text = await response.text();
-          dispatch({
-            type: 'STREAM_ERROR',
-            error: `HTTP ${response.status}: ${text}`,
-          });
+      // async = true so the UI thread is never blocked.
+      xhr.open('POST', `${baseUrl}/api/v1/chat`, /* async */ true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.setRequestHeader('Accept', 'text/event-stream');
+      xhr.setRequestHeader('Cache-Control', 'no-cache');
+
+      // ── Progressive read ────────────────────────────────────────────────
+      // readyState 3 (LOADING): data is arriving.
+      // readyState 4 (DONE):    stream is complete or errored.
+      // xhr.responseText always contains the FULL accumulated response, so we
+      // slice from processedRef.current to extract only the new bytes.
+      xhr.onreadystatechange = () => {
+        if (
+          xhr.readyState !== XMLHttpRequest.LOADING &&
+          xhr.readyState !== XMLHttpRequest.DONE
+        ) {
           return;
         }
 
-        const reader = response.body?.getReader();
-        if (!reader) {
-          dispatch({ type: 'STREAM_ERROR', error: 'Response body is not readable' });
-          return;
-        }
+        // Slice only the newly arrived bytes.
+        const newChunk = xhr.responseText.slice(processedRef.current);
+        processedRef.current = xhr.responseText.length;
 
-        const decoder = new TextDecoder();
-        // Partial frame accumulator — a chunk boundary may split a frame.
-        let buffer = '';
-
-        // eslint-disable-next-line no-constant-condition
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          // stream:true keeps the decoder's internal state across calls so
-          // multi-byte UTF-8 sequences that straddle chunk boundaries decode correctly.
-          buffer += decoder.decode(value, { stream: true });
-
-          // SSE frames are delimited by a blank line (\n\n).
-          const frames = buffer.split('\n\n');
-          // The last element is an incomplete frame (or '') — keep it in the buffer.
-          buffer = frames.pop() ?? '';
+        if (newChunk) {
+          // Append to our partial-frame buffer, then split on the SSE frame
+          // delimiter (blank line). The last split element is the incomplete
+          // frame tail — keep it in the buffer for the next progress event.
+          sseBufferRef.current += newChunk;
+          const frames = sseBufferRef.current.split('\n\n');
+          sseBufferRef.current = frames.pop() ?? '';
 
           for (const frame of frames) {
-            const trimmed = frame.trim();
-            if (!trimmed) continue;
-
-            const parsed = parseSSEFrame(trimmed);
-            if (!parsed) continue;
-
-            const { event, data } = parsed;
-
-            let payload: unknown;
-            try {
-              payload = JSON.parse(data);
-            } catch {
-              continue; // skip malformed JSON without crashing the stream
-            }
-
-            switch (event) {
-              case 'message': {
-                const { content } = payload as MessagePayload;
-                if (content) dispatch({ type: 'APPEND_TEXT', content });
-                break;
-              }
-
-              case 'tool_call': {
-                const { tool, args } = payload as ToolCallPayload;
-                dispatch({ type: 'ADD_TOOL_CALL', tool, args });
-                break;
-              }
-
-              case 'tool_result': {
-                const { tool, status, task_id, error_msg } =
-                  payload as ToolResultPayload;
-                dispatch({
-                  type: 'ADD_TOOL_RESULT',
-                  tool,
-                  status,
-                  taskId: task_id,
-                  errorMsg: error_msg,
-                });
-                break;
-              }
-
-              case 'error': {
-                const { error } = payload as { error: string };
-                dispatch({ type: 'STREAM_ERROR', error: error ?? 'Unknown stream error' });
-                reader.cancel();
-                return;
-              }
-            }
+            const trimmedFrame = frame.trim();
+            if (!trimmedFrame) continue;
+            const parsed = parseSSEFrame(trimmedFrame);
+            if (parsed) handleFrame(parsed.event, parsed.data);
           }
         }
 
+        if (xhr.readyState === XMLHttpRequest.DONE) {
+          // Process any final frame left in the buffer (no trailing \n\n).
+          if (sseBufferRef.current.trim()) {
+            const parsed = parseSSEFrame(sseBufferRef.current.trim());
+            if (parsed) handleFrame(parsed.event, parsed.data);
+            sseBufferRef.current = '';
+          }
+
+          if (xhr.status >= 400) {
+            dispatch({
+              type: 'STREAM_ERROR',
+              error: `HTTP ${xhr.status}: ${xhr.responseText.slice(0, 200)}`,
+            });
+          } else {
+            dispatch({ type: 'STREAM_DONE' });
+          }
+        }
+      };
+
+      xhr.onerror = () => {
+        // Log to Metro so network failures are visible during development.
+        console.error('[useSSEChat] XHR onerror — cannot reach', baseUrl,
+          '| Check BASE_URL / LAN IP and that the Go server is running.');
+        dispatch({ type: 'STREAM_ERROR', error: `Cannot connect to ${baseUrl}. Check your BASE_URL.` });
+      };
+
+      // onabort fires when we intentionally cancel — not a user-visible error.
+      xhr.onabort = () => {
         dispatch({ type: 'STREAM_DONE' });
-      } catch (err) {
-        // AbortError is a deliberate cancellation — don't surface it as an error.
-        if ((err as Error).name === 'AbortError') return;
-        dispatch({
-          type: 'STREAM_ERROR',
-          error: (err as Error).message ?? 'Network error',
-        });
-      }
+      };
+
+      // ChatRequest schema: { messages: [{role, content}], stream: true }
+      xhr.send(
+        JSON.stringify({
+          messages: [{ role: 'user', content: trimmed }],
+          stream: true,
+        }),
+      );
     },
-    [baseUrl],
+    [baseUrl, handleFrame],
   );
 
+  // ── reset ─────────────────────────────────────────────────────────────────
   const reset = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
+    xhrRef.current?.abort();
+    xhrRef.current = null;
+    sseBufferRef.current = '';
+    processedRef.current = 0;
     dispatch({ type: 'RESET' });
   }, []);
 
-  return { state, sendMessage, reset };
+  return {
+    messages: state.messages,
+    isExecutingTool: state.isExecutingTool,
+    isStreaming: state.isStreaming,
+    error: state.error,
+    sendMessage,
+    reset,
+  };
 }

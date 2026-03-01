@@ -11,25 +11,36 @@ import (
 	"core-go/internal/llm"
 )
 
-// chatRequest is the JSON body accepted by POST /api/v1/chat.
-type chatRequest struct {
-	Query string `json:"query"`
-	// Mode selects the pipeline: "rag" (knowledge-base Q&A) or
-	// "agent" (task-creation agentic loop). Defaults to "agent".
-	Mode string `json:"mode"`
+// ── Request types (shared/api/chat_request.json) ──────────────────────────────
+
+// apiMessage is one entry in the incoming ChatRequest messages array.
+// Mirrors the schema: { "role": "user"|"assistant"|"system"|"tool", "content": "..." }
+type apiMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
+// chatRequest is the strict JSON body accepted by POST /api/v1/chat.
+// Matches shared/api/chat_request.json exactly — no flat "query" field.
+type chatRequest struct {
+	Messages []apiMessage `json:"messages"`
+	Stream   bool         `json:"stream"`
+}
+
+// ── Handler ───────────────────────────────────────────────────────────────────
+
 // chatHandler returns an http.HandlerFunc that:
-//  1. Validates the JSON request body.
-//  2. Upgrades the response to a Server-Sent Events stream.
-//  3. Routes to either the RAG or Agent pipeline based on Mode.
+//  1. Parses the ChatRequest body (messages array + stream flag).
+//  2. Extracts the user prompt from the last message in the array.
+//  3. Upgrades the response to a Server-Sent Events stream.
+//  4. Routes to either the RAG or Agent pipeline.
 //
 // Dependencies are closed over so the handler is a plain http.HandlerFunc
 // with no global state.
 func chatHandler(kb *agent.KnowledgeBase, ta *agent.TaskAgent) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		// ── 1. Parse and validate request ────────────────────────────────────
+		// ── 1. Parse and validate request ─────────────────────────────────
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB cap
 
 		var req chatRequest
@@ -37,44 +48,65 @@ func chatHandler(kb *agent.KnowledgeBase, ta *agent.TaskAgent) http.HandlerFunc 
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
 			return
 		}
-		if strings.TrimSpace(req.Query) == "" {
-			http.Error(w, `"query" is required`, http.StatusBadRequest)
-			return
-		}
-		if req.Mode == "" {
-			req.Mode = "agent"
-		}
-		if req.Mode != "rag" && req.Mode != "agent" {
-			http.Error(w, `"mode" must be "rag" or "agent"`, http.StatusBadRequest)
+		if len(req.Messages) == 0 {
+			http.Error(w, `"messages" must be a non-empty array`, http.StatusBadRequest)
 			return
 		}
 
-		// ── 2. Assert http.Flusher before committing SSE headers ─────────────
+		// Extract the user prompt from the last message in the conversation.
+		// Multi-turn history is carried by the client; the backend treats the
+		// final entry as the active user turn.
+		lastMsg := req.Messages[len(req.Messages)-1]
+		userPrompt := strings.TrimSpace(lastMsg.Content)
+		if userPrompt == "" {
+			http.Error(w, "last message content must not be empty", http.StatusBadRequest)
+			return
+		}
+
+		// ── 2. Assert http.Flusher before committing SSE headers ──────────
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, "streaming not supported by this server", http.StatusInternalServerError)
 			return
 		}
 
-		// ── 3. Commit SSE headers ─────────────────────────────────────────────
-		// Nothing has been written to the body yet, so status code is still
-		// configurable. After this point all errors are SSE error events.
+		// ── 3. Commit SSE headers ──────────────────────────────────────────
+		// Nothing has been written to the body yet, so the status code is
+		// still configurable. After this point all errors are SSE error events.
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("X-Accel-Buffering", "no") // prevents nginx from buffering the stream
+		w.Header().Set("X-Accel-Buffering", "no") // prevents nginx from buffering
 
-		// ── 4. Route to the chosen pipeline ──────────────────────────────────
-		switch req.Mode {
-		case "rag":
-			streamRAG(w, flusher, r, kb, req.Query)
-		case "agent":
-			streamAgent(w, flusher, r, ta, req.Query)
+		// ── 4. Route ───────────────────────────────────────────────────────
+		// The ChatRequest schema has no "mode" field. Routing is determined by
+		// scanning for a system message that sets the pipeline context:
+		//   - system content contains "knowledge" or "rag" → RAG pipeline
+		//   - everything else                              → Agent pipeline
+		if hasRAGContext(req.Messages) {
+			streamRAG(w, flusher, r, kb, userPrompt)
+		} else {
+			streamAgent(w, flusher, r, ta, userPrompt)
 		}
 	}
 }
 
-// ── RAG pipeline ─────────────────────────────────────────────────────────────
+// hasRAGContext returns true when the message history contains a system
+// message whose content signals knowledge-base retrieval mode.
+// This keeps routing implicit in the conversation rather than a separate field.
+func hasRAGContext(messages []apiMessage) bool {
+	for _, m := range messages {
+		if m.Role == "system" {
+			lc := strings.ToLower(m.Content)
+			if strings.Contains(lc, "knowledge") || strings.Contains(lc, "rag") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ── RAG pipeline ──────────────────────────────────────────────────────────────
 
 // streamRAG runs AskKnowledgeBase and writes each text chunk as an SSE
 // "message" event.
@@ -116,7 +148,7 @@ func streamAgent(w http.ResponseWriter, f http.Flusher, r *http.Request, ta *age
 			}
 
 		case agent.EventToolCall:
-			// UI uses this to show a loading/executing state.
+			// UI uses this to show a loading / executing state.
 			writeSSEEvent(w, f, "tool_call", map[string]any{
 				"tool":   event.Tool,
 				"status": "executing",
@@ -124,8 +156,7 @@ func streamAgent(w http.ResponseWriter, f http.Flusher, r *http.Request, ta *age
 			})
 
 		case agent.EventToolDone:
-			// task_id is sent as a string to match the shared schema
-			// ("The returned UUID from Postgres" — stored as string in JSON).
+			// task_id serialised as a string per shared/api/sse_payloads.json.
 			writeSSEEvent(w, f, "tool_result", map[string]any{
 				"tool":    event.Tool,
 				"status":  "success",
@@ -165,8 +196,7 @@ func writeSSEEvent(w http.ResponseWriter, f http.Flusher, event string, data any
 }
 
 // writeSSEError writes a single SSE "error" event and flushes.
-// Used only for pipeline startup failures that occur before any
-// other events have been written.
+// Used only for pipeline startup failures before any other events are written.
 func writeSSEError(w http.ResponseWriter, f http.Flusher, msg string) {
 	writeSSEEvent(w, f, "error", map[string]string{"error": msg})
 }
