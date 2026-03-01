@@ -24,12 +24,15 @@
       "type": "boolean",
       "default": true,
       "description": "Must be true to enable Server-Sent Events (SSE)."
-    }
-  },
-  "properties": {
+    },
     "user_id": {
       "type": "string",
-      "description": "Device-generated UUID v4 that identifies the requesting user. Scopes RAG retrieval to admin documents + this user's personal context, and tags created tasks to this user. Defaults to 'default' on the server when omitted."
+      "description": "Device-generated UUID v4 that identifies the requesting user. Scopes task creation and retrieval context. Defaults to 'default' on the server when omitted."
+    },
+    "force_task": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, backend enables create_task tool regardless of intent detection."
     }
   },
   "required": ["messages"]

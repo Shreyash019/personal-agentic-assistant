@@ -24,6 +24,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { useHealth } from '@/hooks/use-health';
 import { useIngest, type IngestScope } from '@/hooks/use-ingest';
 import { useUserID } from '@/hooks/use-user-id';
 
@@ -36,6 +37,8 @@ const BASE_URL = `http://${PHYSICAL_DEVICE_HOST}:8080`;
 
 export default function KnowledgeScreen() {
   const userID = useUserID();
+  const health = useHealth(BASE_URL);
+  const isOffline = health === 'offline';
   const { ingest, isLoading, result, error, reset } = useIngest(BASE_URL, userID);
 
   const [text, setText] = useState('');
@@ -58,7 +61,7 @@ export default function KnowledgeScreen() {
     setSource('');
   }, [reset]);
 
-  const submitDisabled = isLoading || !text.trim() || !userID;
+  const submitDisabled = isLoading || !text.trim() || !userID || isOffline;
   const charCount = text.length;
 
   return (
@@ -72,6 +75,13 @@ export default function KnowledgeScreen() {
           <Text style={styles.headerTitle}>Knowledge Base</Text>
         </View>
 
+        {/* ── Offline banner ── */}
+        {isOffline && (
+          <View style={styles.offlineBanner}>
+            <Text style={styles.offlineText}>⚠ System is offline. Please check your connection.</Text>
+          </View>
+        )}
+
         <ScrollView
           style={styles.flex}
           contentContainerStyle={styles.content}
@@ -83,7 +93,7 @@ export default function KnowledgeScreen() {
           {/* ── Scope toggle ── */}
           <View style={styles.section}>
             <Text style={styles.label}>Scope</Text>
-            <ScopeToggle value={scope} onChange={setScope} />
+            <ScopeToggle value={scope} onChange={setScope} disabled={isOffline} />
             <Text style={styles.scopeHint}>
               {scope === 'personal'
                 ? 'Only you can retrieve this content in chat.'
@@ -100,7 +110,7 @@ export default function KnowledgeScreen() {
               placeholder="e.g. about-me.txt, project-notes.md"
               placeholderTextColor="#9CA3AF"
               style={styles.sourceInput}
-              editable={!isLoading}
+              editable={!isLoading && !isOffline}
               returnKeyType="next"
             />
           </View>
@@ -121,7 +131,7 @@ export default function KnowledgeScreen() {
               placeholderTextColor="#9CA3AF"
               multiline
               style={styles.textInput}
-              editable={!isLoading}
+              editable={!isLoading && !isOffline}
               textAlignVertical="top"
             />
             <Text style={styles.hint}>
@@ -131,7 +141,7 @@ export default function KnowledgeScreen() {
 
           {/* ── Result / Error feedback ── */}
           {result && <SuccessBanner result={result} scope={scope} onDismiss={handleReset} />}
-          {error && <ErrorBanner message={error} onDismiss={reset} />}
+          {error && <ErrorBanner message="Could not save to knowledge base. Please try again." onDismiss={reset} />}
 
           {/* ── Submit ── */}
           <Pressable
@@ -183,14 +193,17 @@ function InfoCard() {
 function ScopeToggle({
   value,
   onChange,
+  disabled,
 }: {
   value: IngestScope;
   onChange: (s: IngestScope) => void;
+  disabled?: boolean;
 }) {
   return (
-    <View style={styles.toggle}>
+    <View style={[styles.toggle, disabled && styles.toggleDisabled]}>
       <Pressable
         onPress={() => onChange('personal')}
+        disabled={disabled}
         style={[styles.toggleOption, value === 'personal' && styles.toggleOptionActive]}
         accessibilityRole="radio"
       >
@@ -200,6 +213,7 @@ function ScopeToggle({
       </Pressable>
       <Pressable
         onPress={() => onChange('shared')}
+        disabled={disabled}
         style={[styles.toggleOption, value === 'shared' && styles.toggleOptionActive]}
         accessibilityRole="radio"
       >
@@ -260,6 +274,18 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontSize: 17, fontWeight: '600', color: '#111827' },
 
+  offlineBanner: {
+    marginHorizontal: 16,
+    marginTop: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#FFFBEB',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#FCD34D',
+  },
+  offlineText: { fontSize: 13, color: '#92400E', fontWeight: '500' },
+
   content: { padding: 16, gap: 20, paddingBottom: 40 },
 
   infoCard: {
@@ -287,6 +313,7 @@ const styles = StyleSheet.create({
     padding: 3,
     gap: 3,
   },
+  toggleDisabled: { opacity: 0.5 },
   toggleOption: {
     flex: 1,
     paddingVertical: 8,

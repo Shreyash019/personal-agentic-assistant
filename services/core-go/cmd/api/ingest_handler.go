@@ -51,7 +51,7 @@ func ingestHandler(kb *agent.KnowledgeBase) http.HandlerFunc {
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<20) // 4 MB cap
 
 		var req ingestRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeJSONStrict(r, &req); err != nil {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
 			return
 		}
@@ -65,17 +65,24 @@ func ingestHandler(kb *agent.KnowledgeBase) http.HandlerFunc {
 		if strings.TrimSpace(req.Source) == "" {
 			req.Source = "untitled"
 		}
+		req.Source = strings.TrimSpace(req.Source)
+		if len(req.Source) > 180 {
+			http.Error(w, `"source" is too long`, http.StatusBadRequest)
+			return
+		}
 
 		// Default user_id to "admin" so documents without an explicit owner
 		// are treated as shared knowledge, retrievable by all users.
-		if strings.TrimSpace(req.UserID) == "" {
-			req.UserID = "admin"
+		req.UserID = normalizeUserID(req.UserID, "admin")
+		if !isValidUserID(req.UserID) {
+			http.Error(w, "invalid user_id", http.StatusBadRequest)
+			return
 		}
 
 		// ── 2. Chunk → embed → upsert ──────────────────────────────────────
 		n, err := kb.IngestText(r.Context(), req.Text, req.Source, req.UserID)
 		if err != nil {
-			http.Error(w, "ingest failed: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "ingest failed", http.StatusInternalServerError)
 			return
 		}
 

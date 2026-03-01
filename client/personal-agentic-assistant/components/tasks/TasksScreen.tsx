@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { useHealth } from '@/hooks/use-health';
 import { useUserID } from '@/hooks/use-user-id';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -45,6 +46,8 @@ const BASE_URL = `http://${PHYSICAL_DEVICE_HOST}:8080`;
 
 export default function TasksScreen() {
   const userID = useUserID();
+  const health = useHealth(BASE_URL);
+  const isOffline = health === 'offline';
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -56,11 +59,11 @@ export default function TasksScreen() {
     setError(null);
     try {
       const res = await fetch(`${BASE_URL}/api/v1/tasks?user_id=${encodeURIComponent(userID)}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error('fetch_failed');
       const data: Task[] = await res.json();
       setTasks(data);
-    } catch (e: any) {
-      setError(e.message ?? 'Failed to load tasks');
+    } catch {
+      setError('Could not load tasks. Please try again.');
     } finally {
       isRefresh ? setRefreshing(false) : setLoading(false);
     }
@@ -78,12 +81,12 @@ export default function TasksScreen() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: nextStatus, user_id: userID }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error('fetch_failed');
       setTasks((prev) =>
         prev.map((t) => (t.id === task.id ? { ...t, status: nextStatus } : t)),
       );
-    } catch (e: any) {
-      setError(e.message ?? 'Failed to update task');
+    } catch {
+      setError('Something went wrong. Please try again.');
     }
   }, [userID]);
 
@@ -93,18 +96,18 @@ export default function TasksScreen() {
         `${BASE_URL}/api/v1/tasks/${task.id}?user_id=${encodeURIComponent(userID)}`,
         { method: 'DELETE' },
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error('fetch_failed');
       setTasks((prev) => prev.filter((t) => t.id !== task.id));
-    } catch (e: any) {
-      setError(e.message ?? 'Failed to delete task');
+    } catch {
+      setError('Something went wrong. Please try again.');
     }
   }, [userID]);
 
   const renderItem = useCallback(
     ({ item }: { item: Task }) => (
-      <TaskCard task={item} onToggleDone={markDone} onDelete={deleteTask} />
+      <TaskCard task={item} onToggleDone={markDone} onDelete={deleteTask} isOffline={isOffline} />
     ),
-    [markDone, deleteTask],
+    [markDone, deleteTask, isOffline],
   );
 
   const keyExtractor = useCallback((item: Task) => String(item.id), []);
@@ -124,10 +127,21 @@ export default function TasksScreen() {
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>My Tasks</Text>
-        <Pressable onPress={() => fetchTasks(true)} accessibilityRole="button">
-          <Text style={styles.refreshBtn}>↻ Refresh</Text>
+        <Pressable
+          onPress={() => fetchTasks(true)}
+          disabled={isOffline}
+          accessibilityRole="button"
+        >
+          <Text style={[styles.refreshBtn, isOffline && styles.refreshBtnDisabled]}>↻ Refresh</Text>
         </Pressable>
       </View>
+
+      {/* Offline banner */}
+      {isOffline && (
+        <View style={styles.offlineBanner}>
+          <Text style={styles.offlineText}>⚠ System is offline. Please check your connection.</Text>
+        </View>
+      )}
 
       {/* Error banner */}
       {error ? (
@@ -170,10 +184,12 @@ function TaskCard({
   task,
   onToggleDone,
   onDelete,
+  isOffline,
 }: {
   task: Task;
   onToggleDone: (t: Task) => void;
   onDelete: (t: Task) => void;
+  isOffline: boolean;
 }) {
   const isDone = task.status === 'done';
 
@@ -204,14 +220,20 @@ function TaskCard({
       <View style={styles.cardActions}>
         <Pressable
           onPress={() => onToggleDone(task)}
-          style={[styles.actionBtn, isDone ? styles.actionBtnUndo : styles.actionBtnDone]}
+          disabled={isOffline}
+          style={[
+            styles.actionBtn,
+            isDone ? styles.actionBtnUndo : styles.actionBtnDone,
+            isOffline && styles.actionBtnDisabled,
+          ]}
           accessibilityRole="button"
         >
           <Text style={styles.actionBtnText}>{isDone ? 'Undo' : 'Mark Done'}</Text>
         </Pressable>
         <Pressable
           onPress={() => onDelete(task)}
-          style={[styles.actionBtn, styles.actionBtnDelete]}
+          disabled={isOffline}
+          style={[styles.actionBtn, styles.actionBtnDelete, isOffline && styles.actionBtnDisabled]}
           accessibilityRole="button"
         >
           <Text style={styles.actionBtnText}>Delete</Text>
@@ -283,6 +305,18 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontSize: 17, fontWeight: '600', color: '#111827' },
   refreshBtn: { fontSize: 14, color: '#0a7ea4', fontWeight: '500' },
+  refreshBtnDisabled: { color: '#9CA3AF' },
+
+  offlineBanner: {
+    marginHorizontal: 12,
+    marginTop: 8,
+    padding: 10,
+    backgroundColor: '#FFFBEB',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#FCD34D',
+  },
+  offlineText: { fontSize: 13, color: '#92400E', fontWeight: '500' },
 
   errorBanner: {
     marginHorizontal: 12,
@@ -332,9 +366,10 @@ const styles = StyleSheet.create({
 
   cardActions: { flexDirection: 'row', gap: 8, marginTop: 4 },
   actionBtn: { flex: 1, paddingVertical: 7, borderRadius: 8, alignItems: 'center' },
-  actionBtnDone:   { backgroundColor: '#0a7ea4' },
-  actionBtnUndo:   { backgroundColor: '#6B7280' },
-  actionBtnDelete: { backgroundColor: '#EF4444' },
+  actionBtnDone:     { backgroundColor: '#0a7ea4' },
+  actionBtnUndo:     { backgroundColor: '#6B7280' },
+  actionBtnDelete:   { backgroundColor: '#EF4444' },
+  actionBtnDisabled: { backgroundColor: '#D1D5DB', opacity: 0.6 },
   actionBtnText: { color: '#FFFFFF', fontSize: 13, fontWeight: '600' },
 
   badge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },

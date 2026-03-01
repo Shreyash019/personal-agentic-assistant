@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -25,9 +26,18 @@ type apiMessage struct {
 // UserID is the device-generated UUID of the requesting user; it scopes
 // RAG retrieval and task creation. Defaults to "default" when omitted.
 type chatRequest struct {
-	Messages []apiMessage `json:"messages"`
-	Stream   bool         `json:"stream"`
-	UserID   string       `json:"user_id"`
+	Messages  []apiMessage `json:"messages"`
+	Stream    bool         `json:"stream"`
+	UserID    string       `json:"user_id"`
+	ForceTask bool         `json:"force_task"`
+}
+
+func previewPrompt(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) <= 120 {
+		return trimmed
+	}
+	return trimmed[:120] + "..."
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -47,7 +57,7 @@ func chatHandler(kb *agent.KnowledgeBase, ta *agent.TaskAgent) http.HandlerFunc 
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB cap
 
 		var req chatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeJSONStrict(r, &req); err != nil {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
 			return
 		}
@@ -67,10 +77,19 @@ func chatHandler(kb *agent.KnowledgeBase, ta *agent.TaskAgent) http.HandlerFunc 
 		}
 
 		// Default userID so clients that haven't updated still work.
-		userID := strings.TrimSpace(req.UserID)
-		if userID == "" {
-			userID = "default"
+		userID := normalizeUserID(req.UserID, "default")
+		if !isValidUserID(userID) {
+			http.Error(w, "invalid user_id", http.StatusBadRequest)
+			return
 		}
+
+		log.Printf("chat: user_id=%s force_task=%t stream=%t prompt_len=%d prompt_preview=%q",
+			userID,
+			req.ForceTask,
+			req.Stream,
+			len(userPrompt),
+			previewPrompt(userPrompt),
+		)
 
 		// ── 2. Assert http.Flusher before committing SSE headers ──────────
 		flusher, ok := w.(http.Flusher)
@@ -88,15 +107,30 @@ func chatHandler(kb *agent.KnowledgeBase, ta *agent.TaskAgent) http.HandlerFunc 
 		w.Header().Set("X-Accel-Buffering", "no") // prevents nginx from buffering
 
 		// ── 4. Route ───────────────────────────────────────────────────────
-		// The ChatRequest schema has no "mode" field. Routing is determined by
-		// scanning for a system message that sets the pipeline context:
-		//   - system content contains "knowledge" or "rag" → RAG pipeline
-		//   - everything else                              → Agent pipeline
+		// Knowledge-bound default policy:
+		//   - explicit task mode (`force_task: true`)             → Agent pipeline
+		//   - explicit RAG context system prompt (legacy support) → RAG pipeline
+		//   - otherwise                                            → RAG first,
+		//     which internally emits an out-of-scope response when
+		//     query topic is not covered by indexed knowledge.
 		if hasRAGContext(req.Messages) {
+			log.Printf("chat: route=rag user_id=%s reason=system_context", userID)
 			streamRAG(w, flusher, r, kb, userPrompt, userID)
-		} else {
-			streamAgent(w, flusher, r, ta, userPrompt, userID)
+			return
 		}
+
+		if agent.ShouldUseTaskAgent(userPrompt, req.ForceTask) {
+			reason := "task_intent"
+			if req.ForceTask {
+				reason = "force_task"
+			}
+			log.Printf("chat: route=agent user_id=%s reason=%s", userID, reason)
+			streamAgent(w, flusher, r, ta, userPrompt, userID, req.ForceTask)
+			return
+		}
+
+		log.Printf("chat: route=rag user_id=%s reason=default", userID)
+		streamRAG(w, flusher, r, kb, userPrompt, userID)
 	}
 }
 
@@ -140,8 +174,8 @@ func streamRAG(w http.ResponseWriter, f http.Flusher, r *http.Request, kb *agent
 // streamAgent runs HandleAgentTask and maps each AgentEvent to its
 // corresponding SSE event type as defined in shared/api/sse_payloads.json.
 // userID is forwarded so created tasks are scoped to the requesting user.
-func streamAgent(w http.ResponseWriter, f http.Flusher, r *http.Request, ta *agent.TaskAgent, query, userID string) {
-	ch, err := ta.HandleAgentTask(r.Context(), query, userID)
+func streamAgent(w http.ResponseWriter, f http.Flusher, r *http.Request, ta *agent.TaskAgent, query, userID string, forceTask bool) {
+	ch, err := ta.HandleAgentTask(r.Context(), query, userID, forceTask)
 	if err != nil {
 		writeSSEError(w, f, err.Error())
 		return

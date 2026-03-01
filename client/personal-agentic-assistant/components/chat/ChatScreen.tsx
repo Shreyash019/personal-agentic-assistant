@@ -10,6 +10,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -46,6 +48,7 @@ export default function ChatScreen() {
   const insets = useSafeAreaInsets();
 
   const [inputText, setInputText] = useState('');
+  const [taskModeEnabled, setTaskModeEnabled] = useState(false);
   const listRef = useRef<FlatList<ChatMessage>>(null);
 
   // Auto-scroll to the bottom whenever the message list changes.
@@ -60,18 +63,25 @@ export default function ChatScreen() {
   const handleSend = useCallback(() => {
     const trimmed = inputText.trim();
     if (!trimmed || isStreaming) return;
-    sendMessage(trimmed);
+    sendMessage(trimmed, { forceTask: taskModeEnabled });
     setInputText('');
-  }, [inputText, isStreaming, sendMessage]);
+  }, [inputText, isStreaming, sendMessage, taskModeEnabled]);
 
   const keyExtractor = useCallback((_: ChatMessage, i: number) => String(i), []);
 
   const renderItem = useCallback(
-    ({ item }: { item: ChatMessage }) => <MessageRow message={item} />,
-    [],
+    ({ item, index }: { item: ChatMessage; index: number }) => (
+      <MessageRow
+        message={item}
+        isStreaming={isStreaming}
+        isLatest={index === messages.length - 1}
+      />
+    ),
+    [isStreaming, messages.length],
   );
 
-  const sendDisabled = isStreaming || !inputText.trim();
+  const isOffline = health === 'offline';
+  const sendDisabled = isStreaming || !inputText.trim() || isOffline;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>
@@ -108,14 +118,40 @@ export default function ChatScreen() {
           />
         )}
 
+        {/* ── Offline banner ── */}
+        {isOffline && <OfflineBanner />}
+
         {/* ── Tool execution banner ── */}
         {isExecutingTool && <ExecutingBanner />}
 
         {/* ── Error banner ── */}
-        {error ? <ErrorBanner message={error} /> : null}
+        {error ? <ErrorBanner /> : null}
 
         {/* ── Input bar ── */}
         <View style={[styles.inputBar, { paddingBottom: 10 + insets.bottom }]}>
+          <Pressable
+            onPress={() => setTaskModeEnabled((prev) => !prev)}
+            disabled={isStreaming || isOffline}
+            style={({ pressed }) => [
+              styles.taskModeBtn,
+              taskModeEnabled && styles.taskModeBtnEnabled,
+              (isStreaming || isOffline) && styles.taskModeBtnDisabled,
+              pressed && !(isStreaming || isOffline) && styles.sendBtnPressed,
+            ]}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: taskModeEnabled, disabled: isStreaming || isOffline }}
+            accessibilityLabel="Task mode"
+          >
+            <Text
+              style={[
+                styles.taskModeBtnText,
+                taskModeEnabled && styles.taskModeBtnTextEnabled,
+              ]}
+            >
+              ✓
+            </Text>
+          </Pressable>
+
           <TextInput
             value={inputText}
             onChangeText={setInputText}
@@ -123,7 +159,7 @@ export default function ChatScreen() {
             placeholderTextColor="#9CA3AF"
             multiline
             style={styles.textInput}
-            editable={!isStreaming}
+            editable={!isStreaming && !isOffline}
             returnKeyType="send"
             blurOnSubmit={false}
             onSubmitEditing={handleSend}
@@ -151,7 +187,15 @@ export default function ChatScreen() {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function MessageRow({ message }: { message: ChatMessage }) {
+function MessageRow({
+  message,
+  isStreaming,
+  isLatest,
+}: {
+  message: ChatMessage;
+  isStreaming: boolean;
+  isLatest: boolean;
+}) {
   if (message.role === 'user') {
     return (
       <View style={styles.userRow}>
@@ -163,6 +207,16 @@ function MessageRow({ message }: { message: ChatMessage }) {
   }
 
   if (message.role === 'system') {
+    if (message.content === '__TASK_CREATED__') {
+      return (
+        <View style={styles.systemTaskRow}>
+          <View style={styles.systemTaskPill}>
+            <Text style={styles.systemTaskIcon}>🗂️</Text>
+            <Text style={styles.systemTaskCheck}>✓</Text>
+          </View>
+        </View>
+      );
+    }
     return (
       <View style={styles.systemRow}>
         <Text style={styles.systemText}>{message.content}</Text>
@@ -171,11 +225,61 @@ function MessageRow({ message }: { message: ChatMessage }) {
   }
 
   // assistant
+  if (isStreaming && isLatest && !message.content.trim()) {
+    return (
+      <View style={styles.assistantRow}>
+        <View style={styles.assistantBubble}>
+          <GeneratingDots />
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.assistantRow}>
       <View style={styles.assistantBubble}>
         <Text style={styles.assistantText}>{message.content}</Text>
       </View>
+    </View>
+  );
+}
+
+function GeneratingDots() {
+  const dot1 = useRef(new Animated.Value(0.25)).current;
+  const dot2 = useRef(new Animated.Value(0.25)).current;
+  const dot3 = useRef(new Animated.Value(0.25)).current;
+
+  useEffect(() => {
+    const pulse = (value: Animated.Value) =>
+      Animated.sequence([
+        Animated.timing(value, {
+          toValue: 1,
+          duration: 220,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(value, {
+          toValue: 0.25,
+          duration: 220,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]);
+
+    const loop = Animated.loop(
+      Animated.stagger(120, [pulse(dot1), pulse(dot2), pulse(dot3)]),
+    );
+
+    loop.start();
+    return () => loop.stop();
+  }, [dot1, dot2, dot3]);
+
+  return (
+    <View style={styles.generatingRow}>
+      <Animated.View style={[styles.generatingDot, { opacity: dot1 }]} />
+      <Animated.View style={[styles.generatingDot, { opacity: dot2 }]} />
+      <Animated.View style={[styles.generatingDot, { opacity: dot3 }]} />
+      <Text style={styles.generatingLabel}>Generating…</Text>
     </View>
   );
 }
@@ -219,10 +323,18 @@ function ConnectionDot({ status }: { status: 'checking' | 'online' | 'offline' }
   );
 }
 
-function ErrorBanner({ message }: { message: string }) {
+function OfflineBanner() {
+  return (
+    <View style={styles.offlineBanner}>
+      <Text style={styles.offlineText}>⚠ Assistant is unavailable. Please check your connection.</Text>
+    </View>
+  );
+}
+
+function ErrorBanner() {
   return (
     <View style={styles.errorBanner}>
-      <Text style={styles.errorText}>⚠ {message}</Text>
+      <Text style={styles.errorText}>⚠ Something went wrong. Please try again.</Text>
     </View>
   );
 }
@@ -285,20 +397,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'flex-end',
     marginVertical: 4,
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
   },
   userBubble: {
     backgroundColor: '#0a7ea4',
-    borderRadius: 18,
+    borderRadius: 14,
     borderBottomRightRadius: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     maxWidth: '80%',
   },
   userText: {
     color: '#FFFFFF',
-    fontSize: 15,
-    lineHeight: 21,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '400',
   },
 
   // ── Assistant bubble ──
@@ -318,8 +431,27 @@ const styles = StyleSheet.create({
   },
   assistantText: {
     color: '#111827',
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '400',
+  },
+  generatingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    minHeight: 16,
+  },
+  generatingDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#6B7280',
+  },
+  generatingLabel: {
+    marginLeft: 2,
+    fontSize: 11,
+    color: '#6B7280',
+    fontWeight: '500',
   },
 
   // ── System message ──
@@ -329,9 +461,33 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   systemText: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#6B7280',
     textAlign: 'center',
+  },
+  systemTaskRow: {
+    alignItems: 'center',
+    marginVertical: 6,
+    paddingHorizontal: 16,
+  },
+  systemTaskPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+  },
+  systemTaskIcon: {
+    fontSize: 14,
+  },
+  systemTaskCheck: {
+    fontSize: 14,
+    color: '#047857',
+    fontWeight: '700',
   },
 
   // ── Executing banner ──
@@ -352,6 +508,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: '#92400E',
+  },
+
+  // ── Offline banner ──
+  offlineBanner: {
+    marginHorizontal: 12,
+    marginVertical: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#FFFBEB',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#FCD34D',
+  },
+  offlineText: {
+    fontSize: 13,
+    color: '#92400E',
+    fontWeight: '500',
   },
 
   // ── Error banner ──
@@ -392,6 +565,32 @@ const styles = StyleSheet.create({
   },
 
   // ── Input bar ──
+  taskModeBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 4,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  taskModeBtnEnabled: {
+    backgroundColor: '#0a7ea4',
+    borderColor: '#0a7ea4',
+  },
+  taskModeBtnDisabled: {
+    opacity: 0.6,
+  },
+  taskModeBtnText: {
+    fontSize: 18,
+    color: '#6B7280',
+    fontWeight: '700',
+    lineHeight: 22,
+  },
+  taskModeBtnTextEnabled: {
+    color: '#FFFFFF',
+  },
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
@@ -404,21 +603,22 @@ const styles = StyleSheet.create({
   },
   textInput: {
     flex: 1,
-    borderRadius: 20,
+    borderRadius: 4,
     borderWidth: 1,
     borderColor: '#D1D5DB',
     backgroundColor: '#F9FAFB',
     paddingHorizontal: 14,
     paddingVertical: 10,
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '400',
     color: '#111827',
     maxHeight: 120,
   },
   sendBtn: {
     width: 40,
     height: 40,
-    borderRadius: 20,
+    borderRadius: 4,
     backgroundColor: '#0a7ea4',
     alignItems: 'center',
     justifyContent: 'center',

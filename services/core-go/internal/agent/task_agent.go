@@ -45,6 +45,151 @@ type createTaskArgs struct {
 // validPriorities is the canonical set from shared/tools/create_task.json.
 var validPriorities = map[string]bool{"low": true, "medium": true, "high": true}
 
+var taskIntentHints = []string{
+	"create a task",
+	"create task",
+	"add a task",
+	"add task",
+	"create a todo",
+	"add a todo",
+	"new task",
+	"todo",
+	"to-do",
+	"remind me",
+	"set a reminder",
+	"remember to",
+	"add this to my tasks",
+	"task:",
+}
+
+var taskQueryHints = []string{
+	"my task",
+	"my tasks",
+	"list tasks",
+	"show tasks",
+	"show my tasks",
+	"what are my tasks",
+	"any task",
+	"pending task",
+	"pending tasks",
+	"today task",
+	"today tasks",
+	"do i have any tasks",
+}
+
+var taskIntentActionWords = []string{
+	"create",
+	"add",
+	"set",
+	"remember",
+	"remind",
+	"track",
+	"schedule",
+	"note",
+	"record",
+}
+
+var taskIntentSubjectWords = []string{
+	"task",
+	"todo",
+	"to-do",
+	"reminder",
+	"deadline",
+	"follow-up",
+	"follow up",
+}
+
+var nonTaskQuestionPrefixes = []string{
+	"what",
+	"why",
+	"how",
+	"who",
+	"where",
+	"when",
+	"explain",
+	"tell me",
+	"can you explain",
+}
+
+func looksLikeTaskIntent(userMessage string) bool {
+	lc := strings.ToLower(strings.TrimSpace(userMessage))
+	if lc == "" {
+		return false
+	}
+
+	for _, hint := range taskIntentHints {
+		if strings.Contains(lc, hint) {
+			return true
+		}
+	}
+
+	if strings.HasPrefix(lc, "task ") || strings.HasPrefix(lc, "todo ") {
+		return true
+	}
+
+	startsLikeQuestion := false
+	for _, prefix := range nonTaskQuestionPrefixes {
+		if strings.HasPrefix(lc, prefix+" ") || lc == prefix {
+			startsLikeQuestion = true
+			break
+		}
+	}
+
+	hasActionWord := false
+	for _, word := range taskIntentActionWords {
+		if strings.Contains(lc, word) {
+			hasActionWord = true
+			break
+		}
+	}
+
+	hasSubjectWord := false
+	for _, word := range taskIntentSubjectWords {
+		if strings.Contains(lc, word) {
+			hasSubjectWord = true
+			break
+		}
+	}
+
+	if hasActionWord && hasSubjectWord {
+		return true
+	}
+
+	if startsLikeQuestion {
+		return false
+	}
+
+	return false
+}
+
+func looksLikeTaskQuery(userMessage string) bool {
+	lc := strings.ToLower(strings.TrimSpace(userMessage))
+	if lc == "" {
+		return false
+	}
+
+	for _, hint := range taskQueryHints {
+		if strings.Contains(lc, hint) {
+			return true
+		}
+	}
+
+	if strings.HasPrefix(lc, "task ") || strings.HasPrefix(lc, "tasks ") {
+		return true
+	}
+
+	return false
+}
+
+// ShouldUseTaskAgent decides if a user query should be routed to the task
+// agent pipeline (task creation or task list/query), optionally forced by UI.
+func ShouldUseTaskAgent(userMessage string, forceTask bool) bool {
+	if forceTask {
+		return true
+	}
+	return looksLikeTaskIntent(userMessage) || looksLikeTaskQuery(userMessage)
+}
+
 func validateCreateTaskArgs(raw json.RawMessage) (createTaskArgs, error) {
 	var args createTaskArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -90,7 +235,9 @@ func NewTaskAgent(repo db.TaskRepository) *TaskAgent {
 // userID is the device-generated UUID of the requesting user. It is stored
 // alongside the task so tasks are per-user. Pass "admin" for system tasks.
 //
-//  1. Sends userMessage to Ollama with the create_task tool attached.
+//  1. Checks whether userMessage is explicit task intent.
+//  2. If yes, sends userMessage to Ollama with the create_task tool attached.
+//     If not, sends userMessage without tools for normal conversational chat.
 //  2. If Ollama returns a ToolCall chunk:
 //     a. Validates the extracted args (title required, priority enum).
 //     b. Emits EventToolCall so the UI can show a loading state.
@@ -98,19 +245,62 @@ func NewTaskAgent(repo db.TaskRepository) *TaskAgent {
 //     d. Emits EventToolDone with the generated task ID.
 //     e. Sends a tool-result confirmation back to Ollama for a final summary.
 //  3. Streams all LLM text tokens as EventText.
-func (ta *TaskAgent) HandleAgentTask(ctx context.Context, userMessage, userID string) (<-chan AgentEvent, error) {
+func (ta *TaskAgent) HandleAgentTask(ctx context.Context, userMessage, userID string, forceTask bool) (<-chan AgentEvent, error) {
+	if looksLikeTaskQuery(userMessage) && !forceTask {
+		return ta.handleTaskListQuery(ctx, userID)
+	}
+
 	messages := []llm.Message{
 		{Role: "system", Content: agentSystemPrompt},
 		{Role: "user", Content: userMessage},
 	}
 
-	ch, err := llm.StreamChat(ctx, messages, []llm.Tool{llm.CreateTaskTool})
+	var tools []llm.Tool
+	if forceTask || looksLikeTaskIntent(userMessage) {
+		tools = []llm.Tool{llm.CreateTaskTool}
+	}
+
+	ch, err := llm.StreamChat(ctx, messages, tools)
 	if err != nil {
 		return nil, fmt.Errorf("agent: start stream: %w", err)
 	}
 
 	out := make(chan AgentEvent, 16)
 	go ta.runLoop(ctx, ch, messages, userID, out)
+	return out, nil
+}
+
+func (ta *TaskAgent) handleTaskListQuery(ctx context.Context, userID string) (<-chan AgentEvent, error) {
+	tasks, err := ta.repo.ListTasks(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("agent: list tasks: %w", err)
+	}
+
+	message := "You don't have any tasks yet."
+	if len(tasks) > 0 {
+		limit := len(tasks)
+		if limit > 5 {
+			limit = 5
+		}
+
+		lines := make([]string, 0, limit+2)
+		lines = append(lines, "Here are your tasks:")
+		for i := 0; i < limit; i++ {
+			t := tasks[i]
+			lines = append(lines, fmt.Sprintf("%d) %s [%s | %s]", i+1, t.Title, t.Status, t.Priority))
+		}
+		if len(tasks) > limit {
+			lines = append(lines, fmt.Sprintf("...and %d more.", len(tasks)-limit))
+		}
+		message = strings.Join(lines, "\n")
+	}
+
+	out := make(chan AgentEvent, 1)
+	go func() {
+		defer close(out)
+		emit(ctx, out, AgentEvent{Kind: EventText, Text: message})
+	}()
+
 	return out, nil
 }
 

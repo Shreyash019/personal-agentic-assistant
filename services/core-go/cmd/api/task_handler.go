@@ -28,10 +28,14 @@ func listTasksHandler(repo db.TaskRepository) http.HandlerFunc {
 			http.Error(w, `"user_id" query parameter is required`, http.StatusBadRequest)
 			return
 		}
+		if !isValidUserID(userID) {
+			http.Error(w, "invalid user_id", http.StatusBadRequest)
+			return
+		}
 
 		tasks, err := repo.ListTasks(r.Context(), userID)
 		if err != nil {
-			http.Error(w, "failed to list tasks: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "failed to list tasks", http.StatusInternalServerError)
 			return
 		}
 
@@ -64,7 +68,7 @@ func updateTaskHandler(repo db.TaskRepository) http.HandlerFunc {
 		}
 
 		var req updateTaskStatusRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeJSONStrict(r, &req); err != nil {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
 			return
 		}
@@ -80,9 +84,13 @@ func updateTaskHandler(repo db.TaskRepository) http.HandlerFunc {
 			http.Error(w, `"user_id" is required`, http.StatusBadRequest)
 			return
 		}
+		if !isValidUserID(userID) {
+			http.Error(w, "invalid user_id", http.StatusBadRequest)
+			return
+		}
 
 		if err := repo.UpdateTaskStatus(r.Context(), id, userID, req.Status); err != nil {
-			http.Error(w, "failed to update task: "+err.Error(), http.StatusNotFound)
+			http.Error(w, "failed to update task", http.StatusNotFound)
 			return
 		}
 
@@ -107,9 +115,13 @@ func deleteTaskHandler(repo db.TaskRepository) http.HandlerFunc {
 			http.Error(w, `"user_id" query parameter is required`, http.StatusBadRequest)
 			return
 		}
+		if !isValidUserID(userID) {
+			http.Error(w, "invalid user_id", http.StatusBadRequest)
+			return
+		}
 
 		if err := repo.DeleteTask(r.Context(), id, userID); err != nil {
-			http.Error(w, "failed to delete task: "+err.Error(), http.StatusNotFound)
+			http.Error(w, "failed to delete task", http.StatusNotFound)
 			return
 		}
 

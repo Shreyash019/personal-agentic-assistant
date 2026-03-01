@@ -35,7 +35,7 @@ export type UseSSEChatReturn = {
   isExecutingTool: boolean;
   isStreaming: boolean;
   error: string | null;
-  sendMessage: (text: string) => void;
+  sendMessage: (text: string, options?: { forceTask?: boolean }) => void;
   reset: () => void;
 };
 
@@ -46,7 +46,7 @@ type Action =
   | { type: 'STREAM_START' }
   | { type: 'APPEND_ASSISTANT_TEXT'; content: string }
   | { type: 'TOOL_EXECUTING' }
-  | { type: 'TOOL_DONE'; systemMsg: string }
+  | { type: 'TOOL_DONE'; success: boolean; errorMsg?: string }
   | { type: 'STREAM_DONE' }
   | { type: 'STREAM_ERROR'; error: string }
   | { type: 'RESET' };
@@ -57,6 +57,15 @@ const initialState: ChatState = {
   isStreaming: false,
   error: null,
 };
+
+function trimTrailingEmptyAssistant(messages: ChatMessage[]): ChatMessage[] {
+  if (messages.length === 0) return messages;
+  const last = messages[messages.length - 1];
+  if (last.role === 'assistant' && !last.content.trim()) {
+    return messages.slice(0, -1);
+  }
+  return messages;
+}
 
 function chatReducer(state: ChatState, action: Action): ChatState {
   switch (action.type) {
@@ -90,19 +99,30 @@ function chatReducer(state: ChatState, action: Action): ChatState {
       return { ...state, isExecutingTool: true };
 
     case 'TOOL_DONE':
+      if (!action.success) {
+        return {
+          ...state,
+          isExecutingTool: false,
+          messages: [...state.messages, { role: 'system', content: `❌ ${action.errorMsg ?? 'Task creation failed'}` }],
+        };
+      }
       return {
         ...state,
         isExecutingTool: false,
-        // Append a system message confirming the action so the user sees it
-        // in the conversation history even after the banner disappears.
-        messages: [...state.messages, { role: 'system', content: action.systemMsg }],
+        messages: [...state.messages, { role: 'system', content: '__TASK_CREATED__' }],
       };
 
     case 'STREAM_DONE':
-      return { ...state, isStreaming: false };
+      return { ...state, isStreaming: false, messages: trimTrailingEmptyAssistant(state.messages) };
 
     case 'STREAM_ERROR':
-      return { ...state, isStreaming: false, isExecutingTool: false, error: action.error };
+      return {
+        ...state,
+        isStreaming: false,
+        isExecutingTool: false,
+        error: action.error,
+        messages: trimTrailingEmptyAssistant(state.messages),
+      };
 
     case 'RESET':
       return initialState;
@@ -175,11 +195,11 @@ export function useSSEChat(baseUrl = DEFAULT_BASE_URL, { userID = '' }: { userID
           task_id?: string;
           error_msg?: string;
         };
-        const systemMsg =
-          p.status === 'success'
-            ? `✅ Task created successfully (ID: ${p.task_id ?? 'unknown'})`
-            : `❌ Task creation failed: ${p.error_msg ?? 'Unknown error'}`;
-        dispatch({ type: 'TOOL_DONE', systemMsg });
+        dispatch({
+          type: 'TOOL_DONE',
+          success: p.status === 'success',
+          errorMsg: p.error_msg,
+        });
         break;
       }
 
@@ -195,7 +215,7 @@ export function useSSEChat(baseUrl = DEFAULT_BASE_URL, { userID = '' }: { userID
 
   // ── sendMessage ───────────────────────────────────────────────────────────
   const sendMessage = useCallback(
-    (text: string) => {
+    (text: string, options?: { forceTask?: boolean }) => {
       const trimmed = text.trim();
       if (!trimmed) return;
 
@@ -280,12 +300,13 @@ export function useSSEChat(baseUrl = DEFAULT_BASE_URL, { userID = '' }: { userID
         dispatch({ type: 'STREAM_DONE' });
       };
 
-      // ChatRequest schema: { messages: [{role, content}], stream: true, user_id }
+      // ChatRequest schema: { messages: [{role, content}], stream: true, user_id, force_task }
       xhr.send(
         JSON.stringify({
           messages: [{ role: 'user', content: trimmed }],
           stream: true,
           user_id: userID,
+          force_task: Boolean(options?.forceTask),
         }),
       );
     },
