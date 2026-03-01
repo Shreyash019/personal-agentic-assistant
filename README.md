@@ -1,142 +1,206 @@
-# 🧠 Personal Agentic Assistant (Local-First RAG)
+# 🧠 Personal Agentic Assistant
 
-A local-first, privacy-focused mobile assistant leveraging Retrieval-Augmented Generation (RAG) and Agentic Tool-Calling to process personal context, automate task creation, and generate daily summaries.
+Local-first mobile assistant with:
+- **Knowledge Q&A (RAG)** over ingested topics/docs
+- **Agentic task operations** (create/list/update/delete)
+- **Real-time SSE streaming** responses in chat
 
-Built in a 3-day engineering sprint, this monorepo explores high-performance systems design by implementing the core orchestration layer in two backend architectures (Vanilla Go and Python/FastAPI) to benchmark I/O orchestration, JSON parsing overhead, and LLM streaming efficiency.
-
----
-
-## 🏗️ System Architecture
-
-The application operates as a Local AI Microservices Mesh, utilizing Apple Silicon (Metal) for native LLM inference while containerizing the data tier for clean environmental separation.
-
-**Core Stack:**
-- **Client:** React Native (Vanilla primitives, zero heavy UI frameworks, custom SSE hooks)
-- **Backend A (High-Performance):** Go 1.22+ (Standard Library net/http, jackc/pgx/v5 for Postgres)
-- **Backend B (Rapid Iteration):** Python 3.11+ (FastAPI, asyncpg, pydantic)
-- **Relational Database:** PostgreSQL (Dockerized)
-- **Vector Database:** Qdrant (Dockerized)
-- **Inference Engine:** Ollama running natively on macOS (llama3.1:8b for tool calling, nomic-embed-text for vectorization)
-
-**Architectural Diagram:**
-
-```
-📱 React Native Client (Mobile)
-    │
-    ├─ [SSE Stream] ─ HTTP POST /chat ─┐
-    │                                  │
-    ▼                                  ▼
- 🟢 API Gateway (Go / net/http)    🔵 API Gateway (Python / FastAPI)
-    │                                  │
-    ├──────────────────────────────────┤
-    │           Orchestrator           │
-    │  (Intent Parsing, Tool Calling)  │
-    │                                  │
-    ├──────────────┬───────────────────┤
-    ▼              ▼                   ▼
- 🐘 PostgreSQL   🗂️ Qdrant         🦙 Ollama (Native macOS)
-  (Tasks/Notes)  (Embeddings)     (llama3.1:8b + Metal GPU)
-```
+Primary runtime is **Go backend + Expo client + Postgres + Qdrant + Ollama**.
 
 ---
 
-## ⚡ Key Engineering Decisions
+## ✅ Current Project Status
 
-1. **Dual-Backend "Bake-Off":**
-   - Go (Vanilla): Goroutines for concurrent vector ingestion, net/http for zero-dependency routing. Minimal memory footprint and raw throughput.
-   - Python (FastAPI): asyncpg and pure async/await for non-blocking I/O. Skipped heavy abstraction layers for granular control.
-
-2. **Native Inference vs. Dockerized Data:**
-   - PostgreSQL and Qdrant run in Docker for clean state management.
-   - Ollama runs natively on macOS, bypassing Docker-for-Mac's lack of GPU passthrough, allowing full Metal API utilization.
-
-3. **Resilient Tool Calling (Agentic Loop):**
-   - Implements a Retry and Repair Loop for malformed LLM tool arguments, feeding parsing errors back to the LLM as system corrections.
-
-4. **Zero-Dependency Mobile Philosophy:**
-   - React Native client avoids heavy chat UI libraries, uses custom useReducer state machine and native fetch for SSE.
-
----
-
-## 🚀 Features
-
-- **Local-First Ingestion Pipeline:** Securely vectorize and query personal .txt and .md files without external APIs.
-- **Agentic Task Management:** Natural language mapped to strict database operations.
-- **Real-Time Streaming:** Chunked byte-stream processing from LLM to mobile UI.
-- **Daily Summarization:** Background workers generate structured markdown briefings.
+Implemented and working:
+- Go API on `:8080` with streaming chat endpoint (`/api/v1/chat`)
+- Strict topic-bounded RAG with out-of-scope response:
+   - `I don't have information on that topic.`
+- Task intent routing + manual `force_task` support
+- Task query in chat (`What are my tasks?`) returns list response
+- Admin document management APIs (list/update/delete/ingest)
+- React Native chat UX improvements:
+   - compact task toggle
+   - task-created inline marker
+   - settings tab (`ABOUT`, `PRIVACY POLICY`)
+   - inline response-generation animation (typing dots + `Generating…`)
+- Security hardening in Go API:
+   - strict JSON decoding
+   - `user_id` validation
+   - optional admin token auth
+   - CORS allowlist
+   - security headers + server timeouts
+   - request logging middleware
 
 ---
 
-## 📂 Monorepo Structure
+## 🧱 Stack
 
-```
-personal-agent-monorepo/
-├── docker-compose.yml          # Bootstraps Postgres and Qdrant
-├── init.sql                    # Postgres schema (Tasks, History tables)
-├── client/                     # React Native App
-│   ├── src/hooks/              # Custom useSSEChat hook
-│   └── src/ui/                 # Core unstyled components
+- **Mobile Client:** Expo React Native (`client/personal-agentic-assistant`)
+- **Primary Backend:** Go (`services/core-go`)
+- **Optional/Reference Backend:** Python FastAPI (`services/core-python`)
+- **DB:** PostgreSQL (Docker)
+- **Vector DB:** Qdrant (Docker)
+- **LLM Runtime:** Ollama on macOS (`llama3.1:8b`, `nomic-embed-text`)
+
+---
+
+## 📂 Monorepo Layout
+
+```text
+.
+├── docker-compose.yml
+├── init.sql
+├── client/
+│   ├── personal-agentic-assistant/   # Expo mobile app
+│   └── admin-panel/                  # Admin docs UI
 ├── services/
-│   ├── core-go/                # Vanilla Go Implementation
-│   │   ├── cmd/api/            # Entry point
-│   │   └── internal/           # Domain logic (Agent, DB, LLM clients)
-│   ├── core-python/            # FastAPI Implementation
-│   │   ├── app/agent/          # Tool orchestration loop
-│   │   └── app/database/       # asyncpg connection pools
-└── shared/                     # Cross-service JSON schemas and API contracts
+│   ├── core-go/                      # Primary Go backend
+│   └── core-python/                  # Reference Python backend
+├── shared/
+│   └── api/                          # JSON request/event contracts
+└── tools/
 ```
 
 ---
 
-## 🛠️ Getting Started (Local Development)
+## 🚀 Run Locally (Recommended Flow)
 
-**Prerequisites:**
-- Docker Desktop
-- Go 1.22+ & Python 3.11+
-- Node.js & React Native CLI
-- Ollama installed natively on macOS
+### 1) Start infra + models
 
-**1. Start Infrastructure**
 ```bash
 docker-compose up -d
-ollama run llama3.1:8b
+ollama pull llama3.1:8b
 ollama pull nomic-embed-text
+ollama serve
 ```
 
-**2. Run the Backend (Choose One)**
+### 2) Start Go backend
 
-*Go Backend (Port 8080):*
 ```bash
 cd services/core-go
-go run cmd/api/main.go
+go run ./cmd/api
 ```
 
-*Python Backend (Port 8000):*
+Health check:
+
 ```bash
-cd services/core-python
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+curl http://localhost:8080/health
 ```
 
-**3. Run the Mobile Client**
+### 3) Start mobile app
+
 ```bash
-cd client
+cd client/personal-agentic-assistant
 npm install
-npm run ios # or npm run android
+npx expo start
+```
+
+### 4) (Optional) Start admin panel
+
+```bash
+cd client/admin-panel
+npm install
+npm run dev
 ```
 
 ---
 
-## 📊 Performance Benchmark (WIP)
+## 🔌 API Overview (Go)
 
-To be filled after sprint completion.
+Base URL: `http://localhost:8080`
 
-| Metric                  | Go (net/http + pgx) | Python (FastAPI + asyncpg) |
-|-------------------------|---------------------|----------------------------|
-| Idle Memory             | ~X MB               | ~Y MB                      |
-| Active SSE Memory       | ~X MB               | ~Y MB                      |
-| Tool-Call Loop Latency  | X ms                | Y ms                       |
+- `GET /health`
+- `POST /api/v1/chat` (SSE)
+- `POST /api/v1/documents` (ingest; admin-protected when `ADMIN_API_KEY` is set)
+- `GET /api/v1/tasks`
+- `PATCH /api/v1/tasks/{id}`
+- `DELETE /api/v1/tasks/{id}`
+- `GET /api/v1/admin/documents`
+- `PUT /api/v1/admin/documents`
+- `DELETE /api/v1/admin/documents`
+
+Postman collection:
+- `shared/api/go-backend.postman_collection.json`
 
 ---
 
-Built as a proof-of-work for high-performance systems engineering, RAG architecture, and secure local-first development.
+## 🧠 Chat Routing Behavior
+
+`POST /api/v1/chat` routes requests as:
+- **Task path** when:
+   - user intent is task-related, or
+   - `force_task: true`
+- **RAG path** otherwise
+
+RAG answers only from ingested knowledge scope (`admin + user_id`) and returns boundary text for out-of-scope topics.
+
+---
+
+## 🔐 Security & Config
+
+Important env vars for `services/core-go`:
+
+- `DATABASE_URL` (default: local Postgres)
+- `QDRANT_URL` (default: `http://localhost:6333`)
+- `ALLOWED_ORIGINS` (comma-separated CORS allowlist)
+- `ADMIN_API_KEY` (enables token auth on admin/doc endpoints)
+- `RAG_TOP_K`
+- `RAG_FALLBACK_TOP_K`
+- `RAG_MAX_CONTEXT_CHUNKS`
+- `RAG_MIN_TOP_SEMANTIC_SCORE`
+- `RAG_MIN_SEMANTIC_FLOOR`
+- `RAG_MIN_LEXICAL_SCORE`
+- `RAG_LEXICAL_WEIGHT`
+- `RAG_SOURCE_HINT_WEIGHT`
+
+When `ADMIN_API_KEY` is set, send `X-Admin-Token` header for:
+- `/api/v1/documents`
+- `/api/v1/admin/*`
+
+---
+
+## 🧪 Quick Validation Commands
+
+In-scope example:
+
+```bash
+curl -N -sS -X POST http://localhost:8080/api/v1/chat \
+   -H 'Content-Type: application/json' \
+   -d '{"messages":[{"role":"user","content":"Who is Rama?"}],"user_id":"default"}'
+```
+
+Out-of-scope example:
+
+```bash
+curl -N -sS -X POST http://localhost:8080/api/v1/chat \
+   -H 'Content-Type: application/json' \
+   -d '{"messages":[{"role":"user","content":"What is tennis?"}],"user_id":"default"}'
+```
+
+Task query example:
+
+```bash
+curl -N -sS -X POST http://localhost:8080/api/v1/chat \
+   -H 'Content-Type: application/json' \
+   -d '{"messages":[{"role":"user","content":"What are my tasks?"}],"user_id":"default"}'
+```
+
+---
+
+## 🛠️ Common Troubleshooting
+
+- **Client says cannot connect**
+   - Ensure Go API is running on `:8080`
+   - Ensure mobile `BASE_URL` host in `ChatScreen.tsx` matches your machine/LAN IP for physical devices
+
+- **Chat always out-of-scope**
+   - Verify topics were ingested (`GET /api/v1/admin/documents`)
+   - Ensure `user_id` scope matches expected visibility (`admin` docs are shared)
+
+- **Admin routes denied (401/403)**
+   - Set `X-Admin-Token` when `ADMIN_API_KEY` is enabled
+   - Add frontend origin to `ALLOWED_ORIGINS`
+
+---
+
+If you want a full runbook, see `Runner.md`.
