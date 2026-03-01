@@ -21,7 +21,9 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useHealth } from '@/hooks/use-health';
 import { useSSEChat, type ChatMessage } from '@/hooks/use-sse-chat';
+import { useUserID } from '@/hooks/use-user-id';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -37,8 +39,10 @@ const BASE_URL = `http://${PHYSICAL_DEVICE_HOST}:8080`;
 // ── ChatScreen ────────────────────────────────────────────────────────────────
 
 export default function ChatScreen() {
+  const userID = useUserID();
+  const health = useHealth(BASE_URL);
   const { messages, isExecutingTool, isStreaming, error, sendMessage, reset } =
-    useSSEChat(BASE_URL);
+    useSSEChat(BASE_URL, { userID });
   const insets = useSafeAreaInsets();
 
   const [inputText, setInputText] = useState('');
@@ -78,7 +82,10 @@ export default function ChatScreen() {
       >
         {/* ── Header ── */}
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Assistant</Text>
+          <View style={styles.headerLeft}>
+            <Text style={styles.headerTitle}>Assistant</Text>
+            <ConnectionDot status={health} />
+          </View>
           {messages.length > 0 && (
             <Pressable onPress={reset} accessibilityRole="button">
               <Text style={styles.clearBtn}>Clear</Text>
@@ -198,6 +205,20 @@ function EmptyState() {
   );
 }
 
+/** ConnectionDot — a small coloured circle in the header reflecting GET /health. */
+function ConnectionDot({ status }: { status: 'checking' | 'online' | 'offline' }) {
+  const dotColor =
+    status === 'online' ? '#22C55E' : status === 'offline' ? '#EF4444' : '#F59E0B';
+  const label =
+    status === 'online' ? 'Online' : status === 'offline' ? 'Offline' : 'Connecting…';
+  return (
+    <View style={styles.connectionRow} accessibilityLabel={`Server ${label}`}>
+      <View style={[styles.connectionDot, { backgroundColor: dotColor }]} />
+      <Text style={[styles.connectionLabel, { color: dotColor }]}>{label}</Text>
+    </View>
+  );
+}
+
 function ErrorBanner({ message }: { message: string }) {
   return (
     <View style={styles.errorBanner}>
@@ -223,10 +244,29 @@ const styles = StyleSheet.create({
     borderBottomColor: '#E5E7EB',
     backgroundColor: '#FFFFFF',
   },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   headerTitle: {
     fontSize: 17,
     fontWeight: '600',
     color: '#111827',
+  },
+  connectionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  connectionDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  connectionLabel: {
+    fontSize: 11,
+    fontWeight: '500',
   },
   clearBtn: {
     fontSize: 14,

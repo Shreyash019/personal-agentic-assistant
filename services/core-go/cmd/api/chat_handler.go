@@ -22,9 +22,12 @@ type apiMessage struct {
 
 // chatRequest is the strict JSON body accepted by POST /api/v1/chat.
 // Matches shared/api/chat_request.json exactly — no flat "query" field.
+// UserID is the device-generated UUID of the requesting user; it scopes
+// RAG retrieval and task creation. Defaults to "default" when omitted.
 type chatRequest struct {
 	Messages []apiMessage `json:"messages"`
 	Stream   bool         `json:"stream"`
+	UserID   string       `json:"user_id"`
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -63,6 +66,12 @@ func chatHandler(kb *agent.KnowledgeBase, ta *agent.TaskAgent) http.HandlerFunc 
 			return
 		}
 
+		// Default userID so clients that haven't updated still work.
+		userID := strings.TrimSpace(req.UserID)
+		if userID == "" {
+			userID = "default"
+		}
+
 		// ── 2. Assert http.Flusher before committing SSE headers ──────────
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -84,9 +93,9 @@ func chatHandler(kb *agent.KnowledgeBase, ta *agent.TaskAgent) http.HandlerFunc 
 		//   - system content contains "knowledge" or "rag" → RAG pipeline
 		//   - everything else                              → Agent pipeline
 		if hasRAGContext(req.Messages) {
-			streamRAG(w, flusher, r, kb, userPrompt)
+			streamRAG(w, flusher, r, kb, userPrompt, userID)
 		} else {
-			streamAgent(w, flusher, r, ta, userPrompt)
+			streamAgent(w, flusher, r, ta, userPrompt, userID)
 		}
 	}
 }
@@ -109,9 +118,9 @@ func hasRAGContext(messages []apiMessage) bool {
 // ── RAG pipeline ──────────────────────────────────────────────────────────────
 
 // streamRAG runs AskKnowledgeBase and writes each text chunk as an SSE
-// "message" event.
-func streamRAG(w http.ResponseWriter, f http.Flusher, r *http.Request, kb *agent.KnowledgeBase, query string) {
-	ch, err := kb.AskKnowledgeBase(r.Context(), query)
+// "message" event. userID scopes retrieval to admin + user documents.
+func streamRAG(w http.ResponseWriter, f http.Flusher, r *http.Request, kb *agent.KnowledgeBase, query, userID string) {
+	ch, err := kb.AskKnowledgeBase(r.Context(), query, userID)
 	if err != nil {
 		writeSSEError(w, f, err.Error())
 		return
@@ -130,8 +139,9 @@ func streamRAG(w http.ResponseWriter, f http.Flusher, r *http.Request, kb *agent
 
 // streamAgent runs HandleAgentTask and maps each AgentEvent to its
 // corresponding SSE event type as defined in shared/api/sse_payloads.json.
-func streamAgent(w http.ResponseWriter, f http.Flusher, r *http.Request, ta *agent.TaskAgent, query string) {
-	ch, err := ta.HandleAgentTask(r.Context(), query)
+// userID is forwarded so created tasks are scoped to the requesting user.
+func streamAgent(w http.ResponseWriter, f http.Flusher, r *http.Request, ta *agent.TaskAgent, query, userID string) {
+	ch, err := ta.HandleAgentTask(r.Context(), query, userID)
 	if err != nil {
 		writeSSEError(w, f, err.Error())
 		return

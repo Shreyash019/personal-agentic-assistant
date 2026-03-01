@@ -87,15 +87,18 @@ func NewTaskAgent(repo db.TaskRepository) *TaskAgent {
 // read-only channel of AgentEvents. The channel is closed when the loop
 // completes or ctx is cancelled.
 //
+// userID is the device-generated UUID of the requesting user. It is stored
+// alongside the task so tasks are per-user. Pass "admin" for system tasks.
+//
 //  1. Sends userMessage to Ollama with the create_task tool attached.
 //  2. If Ollama returns a ToolCall chunk:
-//     a. Validates the extracted args (title required, priority 0–3).
+//     a. Validates the extracted args (title required, priority enum).
 //     b. Emits EventToolCall so the UI can show a loading state.
-//     c. Calls TaskRepository.CreateTask.
+//     c. Calls TaskRepository.CreateTask with userID.
 //     d. Emits EventToolDone with the generated task ID.
 //     e. Sends a tool-result confirmation back to Ollama for a final summary.
 //  3. Streams all LLM text tokens as EventText.
-func (ta *TaskAgent) HandleAgentTask(ctx context.Context, userMessage string) (<-chan AgentEvent, error) {
+func (ta *TaskAgent) HandleAgentTask(ctx context.Context, userMessage, userID string) (<-chan AgentEvent, error) {
 	messages := []llm.Message{
 		{Role: "system", Content: agentSystemPrompt},
 		{Role: "user", Content: userMessage},
@@ -107,7 +110,7 @@ func (ta *TaskAgent) HandleAgentTask(ctx context.Context, userMessage string) (<
 	}
 
 	out := make(chan AgentEvent, 16)
-	go ta.runLoop(ctx, ch, messages, out)
+	go ta.runLoop(ctx, ch, messages, userID, out)
 	return out, nil
 }
 
@@ -117,6 +120,7 @@ func (ta *TaskAgent) runLoop(
 	ctx context.Context,
 	ch <-chan llm.Chunk,
 	firstTurnMessages []llm.Message,
+	userID string,
 	out chan<- AgentEvent,
 ) {
 	defer close(out)
@@ -153,8 +157,8 @@ func (ta *TaskAgent) runLoop(
 				Args: validatedArgs,
 			})
 
-			// Step 2c — execute TaskRepository.CreateTask.
-			taskID, err := ta.repo.CreateTask(ctx, args.Title, args.Description, args.Priority)
+			// Step 2c — execute TaskRepository.CreateTask, scoped to the requesting user.
+			taskID, err := ta.repo.CreateTask(ctx, args.Title, args.Description, args.Priority, userID)
 			if err != nil {
 				emit(ctx, out, AgentEvent{
 					Kind:   EventError,

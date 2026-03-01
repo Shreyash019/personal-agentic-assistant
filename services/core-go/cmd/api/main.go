@@ -54,6 +54,15 @@ func main() {
 	}
 	qdrantClient := vector.NewQdrantClient(qdrantURL)
 
+	// Ensure the "Personal Context" collection exists before serving requests.
+	// This is idempotent: if the collection already exists Qdrant returns 200.
+	// Doing it at startup avoids a race where the first RAG query arrives
+	// before any documents have been ingested.
+	if err := qdrantClient.EnsureCollection(ctx, agent.CollectionName(), agent.CollectionDim()); err != nil {
+		log.Fatalf("qdrant: ensure collection: %v", err)
+	}
+	log.Printf("qdrant: collection %q ready (%d dims)", agent.CollectionName(), agent.CollectionDim())
+
 	// ── Agent services ────────────────────────────────────────────────────────
 	kb := agent.NewKnowledgeBase(qdrantClient)
 	ta := agent.NewTaskAgent(taskRepo)
@@ -62,6 +71,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", healthHandler)
 	mux.HandleFunc("POST /api/v1/chat", chatHandler(kb, ta))
+	mux.HandleFunc("POST /api/v1/documents", ingestHandler(kb))
+	mux.HandleFunc("GET /api/v1/tasks", listTasksHandler(taskRepo))
+	mux.HandleFunc("PATCH /api/v1/tasks/{id}", updateTaskHandler(taskRepo))
+	mux.HandleFunc("DELETE /api/v1/tasks/{id}", deleteTaskHandler(taskRepo))
 
 	// ── Server ────────────────────────────────────────────────────────────────
 	server := &http.Server{

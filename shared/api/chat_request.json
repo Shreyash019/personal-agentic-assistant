@@ -26,5 +26,11 @@
       "description": "Must be true to enable Server-Sent Events (SSE)."
     }
   },
+  "properties": {
+    "user_id": {
+      "type": "string",
+      "description": "Device-generated UUID v4 that identifies the requesting user. Scopes RAG retrieval to admin documents + this user's personal context, and tags created tasks to this user. Defaults to 'default' on the server when omitted."
+    }
+  },
   "required": ["messages"]
 }

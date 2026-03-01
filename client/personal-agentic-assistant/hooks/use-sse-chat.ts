@@ -133,7 +133,7 @@ function parseSSEFrame(frame: string): { event: string; data: string } | null {
 
 const DEFAULT_BASE_URL = 'http://localhost:8080'; // Go backend
 
-export function useSSEChat(baseUrl = DEFAULT_BASE_URL): UseSSEChatReturn {
+export function useSSEChat(baseUrl = DEFAULT_BASE_URL, { userID = '' }: { userID?: string } = {}): UseSSEChatReturn {
   const [state, dispatch] = useReducer(chatReducer, initialState);
 
   // XHR instance kept in a ref so sendMessage / reset can abort it.
@@ -280,15 +280,16 @@ export function useSSEChat(baseUrl = DEFAULT_BASE_URL): UseSSEChatReturn {
         dispatch({ type: 'STREAM_DONE' });
       };
 
-      // ChatRequest schema: { messages: [{role, content}], stream: true }
+      // ChatRequest schema: { messages: [{role, content}], stream: true, user_id }
       xhr.send(
         JSON.stringify({
           messages: [{ role: 'user', content: trimmed }],
           stream: true,
+          user_id: userID,
         }),
       );
     },
-    [baseUrl, handleFrame],
+    [baseUrl, handleFrame, userID],
   );
 
   // ── reset ─────────────────────────────────────────────────────────────────

@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IngestRequest",
+  "description": "Body for POST /api/v1/documents. Chunks the supplied text, embeds each chunk with nomic-embed-text (768 dims), and upserts the resulting vectors into the Qdrant 'Personal Context' collection for RAG retrieval.",
+  "type": "object",
+  "properties": {
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Raw text content to ingest. Will be split into overlapping 400-character chunks (50-character overlap). Each chunk is embedded and stored as a separate Qdrant point."
+    },
+    "source": {
+      "type": "string",
+      "description": "Human-readable provenance label (e.g. filename, URL, or document title). Stored in each chunk's payload for attribution. Defaults to 'untitled' when omitted.",
+      "default": "untitled"
+    }
+  },
+  "properties": {
+    "user_id": {
+      "type": "string",
+      "description": "Owner of the ingested document. Chunks are tagged with this value in the Qdrant payload so retrieval can be scoped per-user. Use 'admin' (or omit) for shared knowledge accessible by all users.",
+      "default": "admin"
+    }
+  },
+  "required": ["text"],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "text": "RAG stands for Retrieval-Augmented Generation. It combines a retrieval step (fetching relevant documents from a vector store) with a generation step (asking an LLM to answer using only those documents as context). This grounds model answers in your private data without retraining.",
+      "source": "rag-primer.txt"
+    }
+  ]
+}
